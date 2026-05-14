@@ -99,7 +99,7 @@ static esp_err_t eth_init(void)
     eth_phy_config_t phy_cfg    = ETH_PHY_DEFAULT_CONFIG();
     phy_cfg.phy_addr            = ETH_PHY_ADDR;
     phy_cfg.reset_gpio_num      = ETH_PHY_RST_GPIO;
-    esp_eth_phy_t *phy          = esp_eth_phy_new_ip101(&phy_cfg);
+    esp_eth_phy_t *phy          = esp_eth_phy_new_generic(&phy_cfg);
 
     esp_eth_config_t  eth_cfg   = ETH_DEFAULT_CONFIG(mac, phy);
     esp_eth_handle_t  eth_handle = NULL;

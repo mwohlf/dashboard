@@ -26,8 +26,8 @@
  * ============================================================ */
 #define PHYS_H_RES       800
 #define PHYS_V_RES       1280
-#define LVGL_H_RES       1280   /* after LV_DISP_ROT_90 */
-#define LVGL_V_RES       800
+#define LVGL_H_RES       800    /* portrait, no rotation — matches reference ROTATE_0 */
+#define LVGL_V_RES       1280
 
 /* DSI PHY internal LDO (must be 2500 mV) */
 #define DSI_PHY_LDO_CHAN 3

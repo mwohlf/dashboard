@@ -16,7 +16,6 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "ping/ping_sock.h"
-#include "lwip/netdb.h"
 #include "lwip/inet.h"
 #include "net_scanner.h"
 
@@ -83,18 +82,11 @@ static bool ping_host(uint32_t ip_be)
     return s_ping_ok;
 }
 
-/* Resolves hostname for ip_be (network byte order).
- * Writes the hostname into out, or the dotted-IP string if lookup fails. */
-static void resolve_hostname(uint32_t ip_be, const char *ip_str,
-                             char *out, size_t out_len)
+/* lwIP does not implement gethostbyaddr (reverse DNS).
+ * Hostname column shows the IP address; mDNS support can be added later. */
+static void resolve_hostname(const char *ip_str, char *out, size_t out_len)
 {
-    struct in_addr addr = { .s_addr = ip_be };
-    struct hostent *he  = gethostbyaddr(&addr, sizeof(addr), AF_INET);
-    if (he && he->h_name && he->h_name[0] != '\0') {
-        strlcpy(out, he->h_name, out_len);
-    } else {
-        strlcpy(out, ip_str, out_len);
-    }
+    strlcpy(out, ip_str, out_len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -155,7 +147,7 @@ static void scanner_task(void *arg)
 
             if (up) {
                 char hostname[64];
-                resolve_hostname(target_be, ip_str, hostname, sizeof(hostname));
+                resolve_hostname(ip_str, hostname, sizeof(hostname));
                 found++;
                 ESP_LOGI(TAG, "  %s  %s", ip_str, hostname);
                 if (s_on_host) {

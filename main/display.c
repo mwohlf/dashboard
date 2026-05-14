@@ -22,9 +22,12 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_cache.h"
 #include "driver/i2c_master.h"
 #include "esp_ldo_regulator.h"
 #include "esp_lcd_mipi_dsi.h"
+#include "hal/mipi_dsi_hal.h"
+#include "hal/mipi_dsi_host_ll.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_jd9365.h"
@@ -210,8 +213,11 @@ static esp_err_t init_panel(void)
     ESP_RETURN_ON_ERROR(esp_ldo_acquire_channel(&ldo_cfg, &phy_pwr),
                         TAG, "LDO channel acquire failed");
 
-    /* 2. Create the DSI bus (2-lane, 1500 Mbps/lane) */
+    /* 2. Create the DSI bus (2-lane, 1000 Mbps/lane)
+     *    JD9365 macro defaults to 1500 Mbps; 1000 Mbps matches Espressif's
+     *    official MIPI DSI example and is safer on ESP32-P4 v1.x silicon. */
     esp_lcd_dsi_bus_config_t bus_cfg = JD9365_PANEL_BUS_DSI_2CH_CONFIG();
+    bus_cfg.lane_bit_rate_mbps = 1000;
     ESP_RETURN_ON_ERROR(esp_lcd_new_dsi_bus(&bus_cfg, &s_dsi_bus),
                         TAG, "esp_lcd_new_dsi_bus failed");
 
@@ -221,10 +227,25 @@ static esp_err_t init_panel(void)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_dbi(s_dsi_bus, &dbi_cfg, &dbi_io),
                         TAG, "esp_lcd_new_panel_io_dbi failed");
 
+    /* Workaround for ESP32-P4 v1.x silicon: esp_lcd_new_panel_io_dbi sets
+     * cmd_ack=true, which makes the DSI host perform a Bus Turn-Around (BTA)
+     * after every DCS write and wait forever for an ACK (all DSI timeouts are
+     * 0 in the IDF driver).  On v1.x silicon the panel never ACKs, so the
+     * host spin-waits on gen_cmd_full indefinitely and the watchdog fires.
+     * Disable cmd_ack via the HAL immediately after DBI IO creation.
+     * The internal esp_lcd_dsi_bus_t layout: { int bus_id; mipi_dsi_hal_context_t hal; } */
+    {
+        typedef struct { int bus_id; mipi_dsi_hal_context_t hal; } dsi_bus_priv_t;
+        dsi_bus_priv_t *priv = (dsi_bus_priv_t *)s_dsi_bus;
+        mipi_dsi_host_ll_enable_cmd_ack(priv->hal.host, false);
+        ESP_LOGI(TAG, "DSI cmd_ack disabled (v1.x BTA workaround)");
+    }
+
     /* 4. DPI (video mode) config — 800×1280 @ 60 Hz, RGB565 */
     esp_lcd_dpi_panel_config_t dpi_cfg =
-        JD9365_800_1280_PANEL_60HZ_DPI_CONFIG(LCD_COLOR_PIXEL_FORMAT_RGB565);
-    dpi_cfg.num_fbs = 2;                        /* double-buffering */
+        JD9365_800_1280_PANEL_60HZ_DPI_CONFIG_CF(LCD_COLOR_FMT_RGB565);
+    dpi_cfg.num_fbs = 1;   /* single framebuffer: draw_bitmap always writes to fbs[0],
+                            * DMA always reads from fbs[0] — no double-buffer confusion */
     dpi_cfg.video_timing.vsync_back_porch = 10; /* Waveshare-specific tweak */
 
     /* 5. Vendor config — wire in Waveshare init sequence */
@@ -251,6 +272,34 @@ static esp_err_t init_panel(void)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel),        TAG, "panel reset");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel),         TAG, "panel init");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "disp on");
+
+    /* ----------------------------------------------------------------
+     * DIAGNOSTIC: paint top 100 rows red directly into the DPI
+     * framebuffer, bypassing LVGL entirely.
+     *
+     * If red appears on screen → hardware pipeline (DPI DMA → panel)
+     *   works; LVGL's flush callback is the bottleneck.
+     * If screen stays black → hardware/panel path is broken upstream.
+     * ---------------------------------------------------------------- */
+    {
+        void *fb0 = NULL;
+        esp_err_t fb_err = esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &fb0);
+        if (fb_err == ESP_OK && fb0) {
+            uint16_t *buf = (uint16_t *)fb0;
+            /* Fill top 100 rows with red (RGB565: R=31, G=0, B=0 → 0xF800) */
+            for (int i = 0; i < PHYS_H_RES * 100; i++) {
+                buf[i] = 0xF800;
+            }
+            /* Flush CPU cache → PSRAM so the DMA sees the new pixel data */
+            esp_cache_msync(fb0, PHYS_H_RES * 100 * sizeof(uint16_t),
+                            ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                            ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+            ESP_LOGI(TAG, "DIAG: wrote red stripe to fb0 — check display now");
+        } else {
+            ESP_LOGW(TAG, "DIAG: get_frame_buffer failed (err=0x%x, fb=%p)",
+                     fb_err, fb0);
+        }
+    }
 
     ESP_LOGI(TAG, "JD9365 panel ready (%dx%d)", PHYS_H_RES, PHYS_V_RES);
     return ESP_OK;
@@ -299,13 +348,24 @@ static esp_err_t init_lvgl(void)
     const lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init failed");
 
-    /* Register display — buffer lives in PSRAM */
+    /* Register display — portrait 800×1280, no software rotation.
+     *
+     * The Waveshare reference example (examples/esp-idf/10_lvgl_demo_v9) uses
+     * rotation=ROTATE_0 (no rotation).  sw_rotate on this platform causes cache
+     * thrash (non-sequential PSRAM writes → watchdog) and broken flush semaphore
+     * chains.  Render at physical portrait dimensions and let the UI scroll
+     * vertically, matching the reference pattern.
+     *
+     * Draw buffer in internal RAM (PHYS_H_RES × LVGL_BUF_LINES = ~160 KB):
+     *   - avoid_tearing=false → on_color_trans_done signals lv_disp_flush_ready()
+     *   - IRAM_ATTR applied to that callback in esp_lvgl_port_disp.c so the
+     *     esp_ptr_in_iram() registration check passes */
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle      = NULL,
         .panel_handle   = s_panel,
         .control_handle = NULL,
         .buffer_size    = PHYS_H_RES * LVGL_BUF_LINES,
-        .double_buffer  = true,
+        .double_buffer  = false,
         .hres           = PHYS_H_RES,
         .vres           = PHYS_V_RES,
         .monochrome     = false,
@@ -316,23 +376,18 @@ static esp_err_t init_lvgl(void)
         },
         .flags = {
             .buff_dma    = false,
-            .buff_spiram = true,
-            .sw_rotate   = true,  /* rotate 90° in sw → landscape 1280×800 */
+            .buff_spiram = false,  /* internal RAM: sequential writes, no PSRAM cache thrash */
+            .sw_rotate   = false,
         },
     };
     const lvgl_port_display_dsi_cfg_t dsi_cfg = {
-        .flags.avoid_tearing = false,   /* must be false with sw_rotate */
+        .flags.avoid_tearing = false,
     };
     s_lvgl_disp = lvgl_port_add_disp_dsi(&disp_cfg, &dsi_cfg);
     if (!s_lvgl_disp) {
         ESP_LOGE(TAG, "lvgl_port_add_disp_dsi returned NULL");
         return ESP_FAIL;
     }
-
-    /* Rotate to landscape */
-    lvgl_port_lock(0);
-    lv_disp_set_rotation(s_lvgl_disp, LV_DISP_ROT_90);
-    lvgl_port_unlock();
 
     /* Register touch input */
     const lvgl_port_touch_cfg_t touch_cfg = {
@@ -344,7 +399,7 @@ static esp_err_t init_lvgl(void)
         ESP_LOGW(TAG, "lvgl_port_add_touch returned NULL (touch may not work)");
     }
 
-    ESP_LOGI(TAG, "LVGL port ready (%dx%d landscape)", LVGL_H_RES, LVGL_V_RES);
+    ESP_LOGI(TAG, "LVGL port ready (%dx%d portrait)", PHYS_H_RES, PHYS_V_RES);
     return ESP_OK;
 }
 
