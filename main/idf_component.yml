@@ -1,0 +1,24 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: ">=5.5.0"
+
+  # LVGL 8.x graphics library
+  lvgl/lvgl:
+    version: "8.4.*"
+
+  # ESP LVGL Port — manages LVGL task, display flush, touch input
+  espressif/esp_lvgl_port:
+    version: "^2"
+
+  # GT911 capacitive touch controller
+  espressif/esp_lcd_touch_gt911:
+    version: "^1"
+
+  # JD9365 MIPI-DSI panel driver (Waveshare 10.1" DSI-TOUCH-A)
+  espressif/esp_lcd_jd9365:
+    version: "^2"
+
+  # cJSON (moved out of ESP-IDF core in v6.x)
+  espressif/cjson:
+    version: "^1"

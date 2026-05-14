@@ -1,0 +1,36 @@
+# Flash size: 16 MB
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Custom partition table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# PSRAM: 32 MB Octal
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_MEMTEST=n
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+
+# Increase main task stack for LVGL
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Enable newlib and FreeRTOS heap for PSRAM
+CONFIG_FREERTOS_ENABLE_HEAP_OVERFLOW_PROTECTION=y
+
+# Wi-Fi provisioning / NVS
+CONFIG_NVS_ASSERT_ERROR_CHECK=n
+
+# LWIP: larger socket buffer for WebSocket
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535
+CONFIG_LWIP_TCP_WND_DEFAULT=65535
+
+# Log level
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ESP-Hosted (C6 Wi-Fi coprocessor via SDIO)
+# These are pre-configured by the Waveshare module; leave defaults.
+
+# LVGL task stack size (esp_lvgl_port default is 6KB; bump for HA UI)
+CONFIG_ESP_LVGL_PORT_TASK_STACK_SIZE=8192

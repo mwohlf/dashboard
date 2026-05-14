@@ -1,0 +1,17 @@
+{
+  "idf.currentSetup": "/home/michael/.espressif/v6.0.1/esp-idf",
+  "clangd.path": "/home/michael/.espressif/tools/esp-clang/esp-19.1.2_20250312/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/michael/Projects/dashboard/build"
+  ],
+  "idf.openOcdConfigs": [
+    "board/esp32p4-builtin.cfg"
+  ],
+  "idf.customExtraVars": {
+    "ADF_PATH": "/home/michael/.espressif/tools/esp-adf"
+  },
+  "idf.flashType": "UART",
+  "idf.port": "/dev/ttyACM0"
+}

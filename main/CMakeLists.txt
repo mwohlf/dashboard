@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "display.c"
+        "net_scanner.c"
+        "ui/ui_dashboard.c"
+    INCLUDE_DIRS
+        "."
+        "ui"
+    REQUIRES
+        nvs_flash
+        esp_eth
+        esp_event
+        esp_netif
+        esp_timer
+        driver
+        esp_lcd
+        esp_hw_support
+        lwip
+        espressif__cjson
+)
