@@ -41,7 +41,9 @@
 #define I2C_PORT_NUM     I2C_NUM_0
 #define I2C_CLK_HZ       400000
 
-/* Backlight controller (I2C) */
+/* Display power / backlight controller (I2C addr 0x45)
+ * reg 0x95: power enable (must be written before DSI panel init)
+ * reg 0x96: brightness 0–255 */
 #define BL_I2C_ADDR      0x45
 #define BL_EN_REG        0x95
 #define BL_BRIGHT_REG    0x96

@@ -16,6 +16,7 @@ idf_component_register(
         driver
         esp_lcd
         esp_hw_support
+        esp_mm
         lwip
         espressif__cjson
 )

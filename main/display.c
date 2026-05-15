@@ -10,10 +10,11 @@
  *
  * Key facts (from Waveshare + Harald Kreuzer research):
  *   - Panel: JD9365, espressif/esp_lcd_jd9365 component
- *   - Backlight: I2C addr 0x45, reg 0x95 (enable), reg 0x96 (level 0–255)
+ *   - Backlight: I2C addr 0x45, reg 0x96 (level 0–255)
  *   - Touch: GT911 at ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS
  *   - PHY LDO: channel 3, 2500 mV
  *   - 2-lane DSI @ 1500 Mbps, vsync_back_porch = 10 (Waveshare specific)
+ *   - BTA workaround required: v1.3 silicon hangs on DCS writes with cmd_ack=true
  *   - Display is physically portrait-only; use LVGL sw_rotate for landscape
  */
 
@@ -22,9 +23,9 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_check.h"
-#include "esp_cache.h"
 #include "driver/i2c_master.h"
 #include "esp_ldo_regulator.h"
+#include "esp_cache.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "hal/mipi_dsi_hal.h"
 #include "hal/mipi_dsi_host_ll.h"
@@ -48,97 +49,220 @@ static esp_lcd_panel_handle_t   s_panel     = NULL;
 static esp_lcd_touch_handle_t   s_touch     = NULL;
 static lv_disp_t               *s_lvgl_disp = NULL;
 
-/* ------------------------------------------------------------------ */
-/*  Waveshare-specific JD9365 init sequence (10.1-DSI-TOUCH-A)         */
-/*  Sourced from waveshareteam/Waveshare-ESP32-components (Apache-2.0) */
-/* ------------------------------------------------------------------ */
+/* Waveshare 10.1-DSI-TOUCH-A init sequence.
+ * Source: waveshareteam/Waveshare-ESP32-components, display/lcd/esp_lcd_jd9365_10_1.
+ * The generic Espressif JD9365 driver's built-in default has different GIP timing and
+ * register values that don't work for this specific panel variant. */
 static const jd9365_lcd_init_cmd_t s_ws_init_cmds[] = {
-    /* Page 0 – unlock & DSI lane config */
-    {0xE0, (uint8_t[]){0x00}, 1, 0},
-    {0xE1, (uint8_t[]){0x93}, 1, 0},
-    {0xE2, (uint8_t[]){0x65}, 1, 0},
-    {0xE3, (uint8_t[]){0xF8}, 1, 0},
-    {0x80, (uint8_t[]){0x01}, 1, 0},   /* 2-lane DSI */
-
-    /* Page 1 – power & gamma */
-    {0xE0, (uint8_t[]){0x01}, 1, 0},
-    {0x00, (uint8_t[]){0x00}, 1, 0},
-    {0x01, (uint8_t[]){0x7E}, 1, 0},
-    {0x03, (uint8_t[]){0x00}, 1, 0},
-    {0x04, (uint8_t[]){0x65}, 1, 0},
-    {0x0C, (uint8_t[]){0x74}, 1, 0},
-    {0x17, (uint8_t[]){0x00}, 1, 0},
-    {0x18, (uint8_t[]){0xD7}, 1, 0},
-    {0x19, (uint8_t[]){0x01}, 1, 0},
-    {0x1A, (uint8_t[]){0x00}, 1, 0},
-    {0x1B, (uint8_t[]){0xD7}, 1, 0},
-    {0x1C, (uint8_t[]){0x01}, 1, 0},
-    {0x1F, (uint8_t[]){0x70}, 1, 0},
-    {0x20, (uint8_t[]){0x2D}, 1, 0},
-    {0x21, (uint8_t[]){0x2D}, 1, 0},
-    {0x22, (uint8_t[]){0x7E}, 1, 0},
-    {0x26, (uint8_t[]){0xF3}, 1, 0},
-
-    /* Positive gamma */
-    {0xE0, (uint8_t[]){0x01}, 1, 0},
-    {0x50, (uint8_t[]){0x01}, 1, 0},
-    {0x51, (uint8_t[]){0x23}, 1, 0},
-    {0x52, (uint8_t[]){0x45}, 1, 0},
-    {0x53, (uint8_t[]){0x67}, 1, 0},
-    {0x54, (uint8_t[]){0x89}, 1, 0},
-    {0x55, (uint8_t[]){0xAB}, 1, 0},
-    {0x56, (uint8_t[]){0x01}, 1, 0},
-    {0x57, (uint8_t[]){0x23}, 1, 0},
-    {0x58, (uint8_t[]){0x45}, 1, 0},
-    {0x59, (uint8_t[]){0x67}, 1, 0},
-    {0x5A, (uint8_t[]){0x89}, 1, 0},
-    {0x5B, (uint8_t[]){0xAB}, 1, 0},
-    {0x5C, (uint8_t[]){0xCD}, 1, 0},
-    {0x5D, (uint8_t[]){0xEF}, 1, 0},
-
+    /* Page 0 — unlock */
+    {0xE0, (uint8_t []){0x00}, 1, 0},
+    {0xE1, (uint8_t []){0x93}, 1, 0},
+    {0xE2, (uint8_t []){0x65}, 1, 0},
+    {0xE3, (uint8_t []){0xF8}, 1, 0},
+    {0x80, (uint8_t []){0x01}, 1, 0},   /* DSI 2-lane mode */
+    /* Page 1 — power / VCOM / timing */
+    {0xE0, (uint8_t []){0x01}, 1, 0},
+    {0x00, (uint8_t []){0x00}, 1, 0},
+    {0x01, (uint8_t []){0x38}, 1, 0},
+    {0x03, (uint8_t []){0x10}, 1, 0},
+    {0x04, (uint8_t []){0x38}, 1, 0},
+    {0x0C, (uint8_t []){0x74}, 1, 0},
+    {0x17, (uint8_t []){0x00}, 1, 0},
+    {0x18, (uint8_t []){0xAF}, 1, 0},
+    {0x19, (uint8_t []){0x00}, 1, 0},
+    {0x1A, (uint8_t []){0x00}, 1, 0},
+    {0x1B, (uint8_t []){0xAF}, 1, 0},
+    {0x1C, (uint8_t []){0x00}, 1, 0},
+    {0x35, (uint8_t []){0x26}, 1, 0},
+    {0x37, (uint8_t []){0x09}, 1, 0},
+    {0x38, (uint8_t []){0x04}, 1, 0},
+    {0x39, (uint8_t []){0x00}, 1, 0},
+    {0x3A, (uint8_t []){0x01}, 1, 0},
+    {0x3C, (uint8_t []){0x78}, 1, 0},
+    {0x3D, (uint8_t []){0xFF}, 1, 0},
+    {0x3E, (uint8_t []){0xFF}, 1, 0},
+    {0x3F, (uint8_t []){0x7F}, 1, 0},
+    {0x40, (uint8_t []){0x06}, 1, 0},
+    {0x41, (uint8_t []){0xA0}, 1, 0},
+    {0x42, (uint8_t []){0x81}, 1, 0},
+    {0x43, (uint8_t []){0x1E}, 1, 0},
+    {0x44, (uint8_t []){0x0D}, 1, 0},
+    {0x45, (uint8_t []){0x28}, 1, 0},
+    {0x55, (uint8_t []){0x02}, 1, 0},
+    {0x57, (uint8_t []){0x69}, 1, 0},
+    {0x59, (uint8_t []){0x0A}, 1, 0},
+    {0x5A, (uint8_t []){0x2A}, 1, 0},
+    {0x5B, (uint8_t []){0x17}, 1, 0},
+    /* Gamma positive */
+    {0x5D, (uint8_t []){0x7F}, 1, 0},
+    {0x5E, (uint8_t []){0x6A}, 1, 0},
+    {0x5F, (uint8_t []){0x5B}, 1, 0},
+    {0x60, (uint8_t []){0x4F}, 1, 0},
+    {0x61, (uint8_t []){0x4A}, 1, 0},
+    {0x62, (uint8_t []){0x3D}, 1, 0},
+    {0x63, (uint8_t []){0x41}, 1, 0},
+    {0x64, (uint8_t []){0x2A}, 1, 0},
+    {0x65, (uint8_t []){0x44}, 1, 0},
+    {0x66, (uint8_t []){0x43}, 1, 0},
+    {0x67, (uint8_t []){0x44}, 1, 0},
+    {0x68, (uint8_t []){0x62}, 1, 0},
+    {0x69, (uint8_t []){0x52}, 1, 0},
+    {0x6A, (uint8_t []){0x59}, 1, 0},
+    {0x6B, (uint8_t []){0x4C}, 1, 0},
+    {0x6C, (uint8_t []){0x48}, 1, 0},
+    {0x6D, (uint8_t []){0x3A}, 1, 0},
+    {0x6E, (uint8_t []){0x26}, 1, 0},
+    {0x6F, (uint8_t []){0x00}, 1, 0},
+    /* Gamma negative */
+    {0x70, (uint8_t []){0x7F}, 1, 0},
+    {0x71, (uint8_t []){0x6A}, 1, 0},
+    {0x72, (uint8_t []){0x5B}, 1, 0},
+    {0x73, (uint8_t []){0x4F}, 1, 0},
+    {0x74, (uint8_t []){0x4A}, 1, 0},
+    {0x75, (uint8_t []){0x3D}, 1, 0},
+    {0x76, (uint8_t []){0x41}, 1, 0},
+    {0x77, (uint8_t []){0x2A}, 1, 0},
+    {0x78, (uint8_t []){0x44}, 1, 0},
+    {0x79, (uint8_t []){0x43}, 1, 0},
+    {0x7A, (uint8_t []){0x44}, 1, 0},
+    {0x7B, (uint8_t []){0x62}, 1, 0},
+    {0x7C, (uint8_t []){0x52}, 1, 0},
+    {0x7D, (uint8_t []){0x59}, 1, 0},
+    {0x7E, (uint8_t []){0x4C}, 1, 0},
+    {0x7F, (uint8_t []){0x48}, 1, 0},
+    {0x80, (uint8_t []){0x3A}, 1, 0},
+    {0x81, (uint8_t []){0x26}, 1, 0},
+    {0x82, (uint8_t []){0x00}, 1, 0},
+    /* Page 2 — GIP mapping */
+    {0xE0, (uint8_t []){0x02}, 1, 0},
+    {0x00, (uint8_t []){0x42}, 1, 0},
+    {0x01, (uint8_t []){0x42}, 1, 0},
+    {0x02, (uint8_t []){0x40}, 1, 0},
+    {0x03, (uint8_t []){0x40}, 1, 0},
+    {0x04, (uint8_t []){0x5E}, 1, 0},
+    {0x05, (uint8_t []){0x5E}, 1, 0},
+    {0x06, (uint8_t []){0x5F}, 1, 0},
+    {0x07, (uint8_t []){0x5F}, 1, 0},
+    {0x08, (uint8_t []){0x5F}, 1, 0},
+    {0x09, (uint8_t []){0x57}, 1, 0},
+    {0x0A, (uint8_t []){0x57}, 1, 0},
+    {0x0B, (uint8_t []){0x77}, 1, 0},
+    {0x0C, (uint8_t []){0x77}, 1, 0},
+    {0x0D, (uint8_t []){0x47}, 1, 0},
+    {0x0E, (uint8_t []){0x47}, 1, 0},
+    {0x0F, (uint8_t []){0x45}, 1, 0},
+    {0x10, (uint8_t []){0x45}, 1, 0},
+    {0x11, (uint8_t []){0x4B}, 1, 0},
+    {0x12, (uint8_t []){0x4B}, 1, 0},
+    {0x13, (uint8_t []){0x49}, 1, 0},
+    {0x14, (uint8_t []){0x49}, 1, 0},
+    {0x15, (uint8_t []){0x5F}, 1, 0},
+    {0x16, (uint8_t []){0x41}, 1, 0},
+    {0x17, (uint8_t []){0x41}, 1, 0},
+    {0x18, (uint8_t []){0x40}, 1, 0},
+    {0x19, (uint8_t []){0x40}, 1, 0},
+    {0x1A, (uint8_t []){0x5E}, 1, 0},
+    {0x1B, (uint8_t []){0x5E}, 1, 0},
+    {0x1C, (uint8_t []){0x5F}, 1, 0},
+    {0x1D, (uint8_t []){0x5F}, 1, 0},
+    {0x1E, (uint8_t []){0x5F}, 1, 0},
+    {0x1F, (uint8_t []){0x57}, 1, 0},
+    {0x20, (uint8_t []){0x57}, 1, 0},
+    {0x21, (uint8_t []){0x77}, 1, 0},
+    {0x22, (uint8_t []){0x77}, 1, 0},
+    {0x23, (uint8_t []){0x46}, 1, 0},
+    {0x24, (uint8_t []){0x46}, 1, 0},
+    {0x25, (uint8_t []){0x44}, 1, 0},
+    {0x26, (uint8_t []){0x44}, 1, 0},
+    {0x27, (uint8_t []){0x4A}, 1, 0},
+    {0x28, (uint8_t []){0x4A}, 1, 0},
+    {0x29, (uint8_t []){0x48}, 1, 0},
+    {0x2A, (uint8_t []){0x48}, 1, 0},
+    {0x2B, (uint8_t []){0x5F}, 1, 0},
+    {0x2C, (uint8_t []){0x01}, 1, 0},
+    {0x2D, (uint8_t []){0x01}, 1, 0},
+    {0x2E, (uint8_t []){0x00}, 1, 0},
+    {0x2F, (uint8_t []){0x00}, 1, 0},
+    {0x30, (uint8_t []){0x1F}, 1, 0},
+    {0x31, (uint8_t []){0x1F}, 1, 0},
+    {0x32, (uint8_t []){0x1E}, 1, 0},
+    {0x33, (uint8_t []){0x1E}, 1, 0},
+    {0x34, (uint8_t []){0x1F}, 1, 0},
+    {0x35, (uint8_t []){0x17}, 1, 0},
+    {0x36, (uint8_t []){0x17}, 1, 0},
+    {0x37, (uint8_t []){0x37}, 1, 0},
+    {0x38, (uint8_t []){0x37}, 1, 0},
+    {0x39, (uint8_t []){0x08}, 1, 0},
+    {0x3A, (uint8_t []){0x08}, 1, 0},
+    {0x3B, (uint8_t []){0x0A}, 1, 0},
+    {0x3C, (uint8_t []){0x0A}, 1, 0},
+    {0x3D, (uint8_t []){0x04}, 1, 0},
+    {0x3E, (uint8_t []){0x04}, 1, 0},
+    {0x3F, (uint8_t []){0x06}, 1, 0},
+    {0x40, (uint8_t []){0x06}, 1, 0},
+    {0x41, (uint8_t []){0x1F}, 1, 0},
+    {0x42, (uint8_t []){0x02}, 1, 0},
+    {0x43, (uint8_t []){0x02}, 1, 0},
+    {0x44, (uint8_t []){0x00}, 1, 0},
+    {0x45, (uint8_t []){0x00}, 1, 0},
+    {0x46, (uint8_t []){0x1F}, 1, 0},
+    {0x47, (uint8_t []){0x1F}, 1, 0},
+    {0x48, (uint8_t []){0x1E}, 1, 0},
+    {0x49, (uint8_t []){0x1E}, 1, 0},
+    {0x4A, (uint8_t []){0x1F}, 1, 0},
+    {0x4B, (uint8_t []){0x17}, 1, 0},
+    {0x4C, (uint8_t []){0x17}, 1, 0},
+    {0x4D, (uint8_t []){0x37}, 1, 0},
+    {0x4E, (uint8_t []){0x37}, 1, 0},
+    {0x4F, (uint8_t []){0x09}, 1, 0},
+    {0x50, (uint8_t []){0x09}, 1, 0},
+    {0x51, (uint8_t []){0x0B}, 1, 0},
+    {0x52, (uint8_t []){0x0B}, 1, 0},
+    {0x53, (uint8_t []){0x05}, 1, 0},
+    {0x54, (uint8_t []){0x05}, 1, 0},
+    {0x55, (uint8_t []){0x07}, 1, 0},
+    {0x56, (uint8_t []){0x07}, 1, 0},
+    {0x57, (uint8_t []){0x1F}, 1, 0},
     /* GIP timing */
-    {0xE0, (uint8_t[]){0x01}, 1, 0},
-    {0xE6, (uint8_t[]){0x02}, 1, 0},
-    {0xE7, (uint8_t[]){0x0C}, 1, 0},
-
-    /* Page 2 */
-    {0xE0, (uint8_t[]){0x02}, 1, 0},
-    {0x00, (uint8_t[]){0x47}, 1, 0},
-    {0x01, (uint8_t[]){0x47}, 1, 0},
-    {0x02, (uint8_t[]){0x47}, 1, 0},
-    {0x03, (uint8_t[]){0x47}, 1, 0},
-    {0x04, (uint8_t[]){0x46}, 1, 0},
-    {0x05, (uint8_t[]){0x46}, 1, 0},
-    {0x06, (uint8_t[]){0x46}, 1, 0},
-    {0x07, (uint8_t[]){0x46}, 1, 0},
-    {0x08, (uint8_t[]){0x45}, 1, 0},
-    {0x09, (uint8_t[]){0x45}, 1, 0},
-    {0x0A, (uint8_t[]){0x45}, 1, 0},
-    {0x0B, (uint8_t[]){0x45}, 1, 0},
-    {0x0C, (uint8_t[]){0x64}, 1, 0},
-    {0x0D, (uint8_t[]){0x64}, 1, 0},
-    {0x0E, (uint8_t[]){0x64}, 1, 0},
-    {0x0F, (uint8_t[]){0x64}, 1, 0},
-    {0x10, (uint8_t[]){0x40}, 1, 0},
-    {0x11, (uint8_t[]){0x40}, 1, 0},
-    {0x12, (uint8_t[]){0x40}, 1, 0},
-    {0x13, (uint8_t[]){0x40}, 1, 0},
-    {0x14, (uint8_t[]){0x00}, 1, 0},
-    {0x15, (uint8_t[]){0x00}, 1, 0},
-    {0x16, (uint8_t[]){0x00}, 1, 0},
-    {0x17, (uint8_t[]){0x00}, 1, 0},
-
-    /* Page 4 – VCOM */
-    {0xE0, (uint8_t[]){0x04}, 1, 0},
-    {0x09, (uint8_t[]){0x11}, 1, 0},
-    {0x0E, (uint8_t[]){0x48}, 1, 0},
-    {0x2B, (uint8_t[]){0x2B}, 1, 0},
-    {0x2E, (uint8_t[]){0x44}, 1, 0},
-
-    /* Back to page 0 */
-    {0xE0, (uint8_t[]){0x00}, 1, 0},
-    {0xE6, (uint8_t[]){0x02}, 1, 0},
-    {0xE7, (uint8_t[]){0x0C}, 1, 0},
+    {0x58, (uint8_t []){0x40}, 1, 0},
+    {0x5B, (uint8_t []){0x30}, 1, 0},
+    {0x5C, (uint8_t []){0x00}, 1, 0},
+    {0x5D, (uint8_t []){0x34}, 1, 0},
+    {0x5E, (uint8_t []){0x05}, 1, 0},
+    {0x5F, (uint8_t []){0x02}, 1, 0},
+    {0x63, (uint8_t []){0x00}, 1, 0},
+    {0x64, (uint8_t []){0x6A}, 1, 0},
+    {0x67, (uint8_t []){0x73}, 1, 0},
+    {0x68, (uint8_t []){0x07}, 1, 0},
+    {0x69, (uint8_t []){0x08}, 1, 0},
+    {0x6A, (uint8_t []){0x6A}, 1, 0},
+    {0x6B, (uint8_t []){0x08}, 1, 0},
+    {0x6C, (uint8_t []){0x00}, 1, 0},
+    {0x6D, (uint8_t []){0x00}, 1, 0},
+    {0x6E, (uint8_t []){0x00}, 1, 0},
+    {0x6F, (uint8_t []){0x88}, 1, 0},
+    {0x75, (uint8_t []){0xFF}, 1, 0},
+    {0x77, (uint8_t []){0xDD}, 1, 0},
+    {0x78, (uint8_t []){0x2C}, 1, 0},
+    {0x79, (uint8_t []){0x15}, 1, 0},
+    {0x7A, (uint8_t []){0x17}, 1, 0},
+    {0x7D, (uint8_t []){0x14}, 1, 0},
+    {0x7E, (uint8_t []){0x82}, 1, 0},
+    /* Page 4 */
+    {0xE0, (uint8_t []){0x04}, 1, 0},
+    {0x00, (uint8_t []){0x0E}, 1, 0},
+    {0x02, (uint8_t []){0xB3}, 1, 0},
+    {0x09, (uint8_t []){0x61}, 1, 0},
+    {0x0E, (uint8_t []){0x48}, 1, 0},
+    {0x37, (uint8_t []){0x58}, 1, 0},
+    {0x2B, (uint8_t []){0x0F}, 1, 0},
+    /* Back to Page 0 — final */
+    {0xE0, (uint8_t []){0x00}, 1, 0},
+    {0xE6, (uint8_t []){0x02}, 1, 0},
+    {0xE7, (uint8_t []){0x0C}, 1, 0},
+    /* Sleep out + display on */
+    {0x11, (uint8_t []){0x00}, 1, 120},
+    {0x29, (uint8_t []){0x00}, 1, 20},
 };
 
 /* ------------------------------------------------------------------ */
@@ -158,6 +282,15 @@ static esp_err_t init_i2c(void)
                         TAG, "i2c_new_master_bus failed");
     ESP_LOGI(TAG, "I2C bus ready (SCL=%d SDA=%d %dHz)",
              I2C_SCL_PIN, I2C_SDA_PIN, I2C_CLK_HZ);
+
+    /* Scan — log every responding address so we can identify the backlight IC */
+    ESP_LOGI(TAG, "I2C scan:");
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_master_probe(s_i2c_bus, addr, 10) == ESP_OK) {
+            ESP_LOGI(TAG, "  device at 0x%02X", addr);
+        }
+    }
+
     return ESP_OK;
 }
 
@@ -174,22 +307,27 @@ static esp_err_t init_backlight(void)
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_bl_dev),
                         TAG, "add backlight I2C device failed");
 
-    /* Enable sequence mandated by the LP8556 / AW9364 backlight controller */
-    uint8_t seq1[] = {BL_EN_REG, 0x11};
-    uint8_t seq2[] = {BL_EN_REG, 0x17};
-    uint8_t seq3[] = {BL_BRIGHT_REG, 0x00};
-    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_bl_dev, seq1, sizeof(seq1), 50), TAG, "BL seq1");
-    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_bl_dev, seq2, sizeof(seq2), 50), TAG, "BL seq2");
-    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_bl_dev, seq3, sizeof(seq3), 50), TAG, "BL off");
-    vTaskDelay(pdMS_TO_TICKS(100));
+    /* Power-enable sequence from Waveshare BSP — register 0x95 controls the
+     * display power supply.  Without this, the JD9365 panel IC has no power
+     * and the screen stays blank regardless of DSI/DPI output. */
+    uint8_t en1[] = {BL_EN_REG, 0x11};
+    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_bl_dev, en1, sizeof(en1), 50), TAG, "BL en1");
+    uint8_t en2[] = {BL_EN_REG, 0x17};
+    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_bl_dev, en2, sizeof(en2), 50), TAG, "BL en2");
 
-    /* Ramp up slowly to avoid inrush */
-    for (int v = 10; v <= BL_DEFAULT_LEVEL; v += 10) {
-        display_set_brightness((uint8_t)v);
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    display_set_brightness(BL_DEFAULT_LEVEL);
-    ESP_LOGI(TAG, "Backlight on (level=%d)", BL_DEFAULT_LEVEL);
+    /* Brightness off initially */
+    uint8_t bl_off[] = {BL_BRIGHT_REG, 0x00};
+    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_bl_dev, bl_off, sizeof(bl_off), 50), TAG, "BL off");
+
+    /* Waveshare BSP waits 100 ms after enable + 1 s for power to stabilize
+     * before creating the DSI panel.  We do the delay here so init_panel()
+     * sees stable rails. */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    uint8_t bl_max[] = {BL_BRIGHT_REG, 0xFF};
+    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_bl_dev, bl_max, sizeof(bl_max), 50), TAG, "BL max");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    ESP_LOGI(TAG, "Display power enabled + backlight on");
     return ESP_OK;
 }
 
@@ -213,11 +351,8 @@ static esp_err_t init_panel(void)
     ESP_RETURN_ON_ERROR(esp_ldo_acquire_channel(&ldo_cfg, &phy_pwr),
                         TAG, "LDO channel acquire failed");
 
-    /* 2. Create the DSI bus (2-lane, 1000 Mbps/lane)
-     *    JD9365 macro defaults to 1500 Mbps; 1000 Mbps matches Espressif's
-     *    official MIPI DSI example and is safer on ESP32-P4 v1.x silicon. */
+    /* 2. Create the DSI bus (2-lane, 1500 Mbps/lane — Waveshare BSP default) */
     esp_lcd_dsi_bus_config_t bus_cfg = JD9365_PANEL_BUS_DSI_2CH_CONFIG();
-    bus_cfg.lane_bit_rate_mbps = 1000;
     ESP_RETURN_ON_ERROR(esp_lcd_new_dsi_bus(&bus_cfg, &s_dsi_bus),
                         TAG, "esp_lcd_new_dsi_bus failed");
 
@@ -227,13 +362,15 @@ static esp_err_t init_panel(void)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_dbi(s_dsi_bus, &dbi_cfg, &dbi_io),
                         TAG, "esp_lcd_new_panel_io_dbi failed");
 
-    /* Workaround for ESP32-P4 v1.x silicon: esp_lcd_new_panel_io_dbi sets
-     * cmd_ack=true, which makes the DSI host perform a Bus Turn-Around (BTA)
-     * after every DCS write and wait forever for an ACK (all DSI timeouts are
-     * 0 in the IDF driver).  On v1.x silicon the panel never ACKs, so the
-     * host spin-waits on gen_cmd_full indefinitely and the watchdog fires.
-     * Disable cmd_ack via the HAL immediately after DBI IO creation.
-     * The internal esp_lcd_dsi_bus_t layout: { int bus_id; mipi_dsi_hal_context_t hal; } */
+    /* Workaround for ESP32-P4 v1.x silicon (confirmed v1.3 affected):
+     * cmd_ack=true causes the DSI host to perform a Bus Turn-Around after
+     * every DCS write and wait for an ACK that never arrives on v1.x silicon.
+     * All DSI timeouts in the IDF driver are 0, so the host spin-waits on
+     * gen_cmd_full indefinitely → IDLE watchdog fires.
+     * The jd9365 driver notes this for reads (skips LCD ID read) but DCS writes
+     * during panel_init are also affected — disable cmd_ack immediately after
+     * DBI IO creation.
+     * Internal esp_lcd_dsi_bus_t layout: { int bus_id; mipi_dsi_hal_context_t hal; } */
     {
         typedef struct { int bus_id; mipi_dsi_hal_context_t hal; } dsi_bus_priv_t;
         dsi_bus_priv_t *priv = (dsi_bus_priv_t *)s_dsi_bus;
@@ -244,11 +381,12 @@ static esp_err_t init_panel(void)
     /* 4. DPI (video mode) config — 800×1280 @ 60 Hz, RGB565 */
     esp_lcd_dpi_panel_config_t dpi_cfg =
         JD9365_800_1280_PANEL_60HZ_DPI_CONFIG_CF(LCD_COLOR_FMT_RGB565);
-    dpi_cfg.num_fbs = 1;   /* single framebuffer: draw_bitmap always writes to fbs[0],
-                            * DMA always reads from fbs[0] — no double-buffer confusion */
+    dpi_cfg.num_fbs = 2;   /* double-buffer required: lvgl_port_add_disp_dsi with
+                            * avoid_tearing=true calls esp_lcd_dpi_panel_get_frame_buffer(panel, 2, ...)
+                            * and registers on_color_trans_done to call lv_disp_flush_ready(). */
     dpi_cfg.video_timing.vsync_back_porch = 10; /* Waveshare-specific tweak */
 
-    /* 5. Vendor config — wire in Waveshare init sequence */
+    /* 5. Vendor config — Waveshare 10.1" panel-specific init sequence */
     jd9365_vendor_config_t vendor_cfg = {
         .init_cmds      = s_ws_init_cmds,
         .init_cmds_size = sizeof(s_ws_init_cmds) / sizeof(s_ws_init_cmds[0]),
@@ -269,37 +407,10 @@ static esp_err_t init_panel(void)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_jd9365(dbi_io, &panel_cfg, &s_panel),
                         TAG, "esp_lcd_new_panel_jd9365 failed");
 
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel),        TAG, "panel reset");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel),         TAG, "panel init");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "disp on");
-
-    /* ----------------------------------------------------------------
-     * DIAGNOSTIC: paint top 100 rows red directly into the DPI
-     * framebuffer, bypassing LVGL entirely.
-     *
-     * If red appears on screen → hardware pipeline (DPI DMA → panel)
-     *   works; LVGL's flush callback is the bottleneck.
-     * If screen stays black → hardware/panel path is broken upstream.
-     * ---------------------------------------------------------------- */
-    {
-        void *fb0 = NULL;
-        esp_err_t fb_err = esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &fb0);
-        if (fb_err == ESP_OK && fb0) {
-            uint16_t *buf = (uint16_t *)fb0;
-            /* Fill top 100 rows with red (RGB565: R=31, G=0, B=0 → 0xF800) */
-            for (int i = 0; i < PHYS_H_RES * 100; i++) {
-                buf[i] = 0xF800;
-            }
-            /* Flush CPU cache → PSRAM so the DMA sees the new pixel data */
-            esp_cache_msync(fb0, PHYS_H_RES * 100 * sizeof(uint16_t),
-                            ESP_CACHE_MSYNC_FLAG_DIR_C2M |
-                            ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-            ESP_LOGI(TAG, "DIAG: wrote red stripe to fb0 — check display now");
-        } else {
-            ESP_LOGW(TAG, "DIAG: get_frame_buffer failed (err=0x%x, fb=%p)",
-                     fb_err, fb0);
-        }
-    }
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), TAG, "panel reset");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel),  TAG, "panel init");
+    /* Note: no esp_lcd_panel_disp_on_off — SLEEP_OUT (0x11) + DISPLAY_ON (0x29)
+     * are already at the end of vendor_specific_init_default, executed during panel_init. */
 
     ESP_LOGI(TAG, "JD9365 panel ready (%dx%d)", PHYS_H_RES, PHYS_V_RES);
     return ESP_OK;
@@ -350,16 +461,14 @@ static esp_err_t init_lvgl(void)
 
     /* Register display — portrait 800×1280, no software rotation.
      *
-     * The Waveshare reference example (examples/esp-idf/10_lvgl_demo_v9) uses
-     * rotation=ROTATE_0 (no rotation).  sw_rotate on this platform causes cache
-     * thrash (non-sequential PSRAM writes → watchdog) and broken flush semaphore
-     * chains.  Render at physical portrait dimensions and let the UI scroll
-     * vertically, matching the reference pattern.
-     *
-     * Draw buffer in internal RAM (PHYS_H_RES × LVGL_BUF_LINES = ~160 KB):
-     *   - avoid_tearing=false → on_color_trans_done signals lv_disp_flush_ready()
-     *   - IRAM_ATTR applied to that callback in esp_lvgl_port_disp.c so the
-     *     esp_ptr_in_iram() registration check passes */
+     * avoid_tearing=true + full_refresh=true: required pairing for DPI double-buffer.
+     *   - avoid_tearing: port gets two PSRAM DPI framebuffers; registers on_refresh_done
+     *     ISR which gives a semaphore at vsync.
+     *   - full_refresh: flush_cb waits on that semaphore (properly blocking, not spinning),
+     *     then calls lv_disp_flush_ready().  Without full_refresh, the semaphore path in
+     *     flush_cb is dead code → lv_disp_flush_ready() never called → LVGL spins at
+     *     lv_refr.c:709 starving IDLE and the display never updates.
+     * Requires num_fbs=2 in dpi_cfg so the port can retrieve both framebuffer pointers. */
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle      = NULL,
         .panel_handle   = s_panel,
@@ -375,13 +484,18 @@ static esp_err_t init_lvgl(void)
             .mirror_y = false,
         },
         .flags = {
-            .buff_dma    = false,
-            .buff_spiram = false,  /* internal RAM: sequential writes, no PSRAM cache thrash */
-            .sw_rotate   = false,
+            .buff_dma     = false,
+            .buff_spiram  = false,
+            .sw_rotate    = false,
+            .full_refresh = true,  /* required with avoid_tearing: the port's on_refresh_done ISR
+                                    * gives a semaphore; flush_cb waits on it (yielding the task),
+                                    * then calls lv_disp_flush_ready().  Without full_refresh the
+                                    * semaphore path is never entered and lv_disp_flush_ready() is
+                                    * never called → LVGL spins at lv_refr.c:709 forever. */
         },
     };
     const lvgl_port_display_dsi_cfg_t dsi_cfg = {
-        .flags.avoid_tearing = false,
+        .flags.avoid_tearing = true,
     };
     s_lvgl_disp = lvgl_port_add_disp_dsi(&disp_cfg, &dsi_cfg);
     if (!s_lvgl_disp) {
@@ -413,6 +527,9 @@ esp_err_t display_init(void)
     ESP_RETURN_ON_ERROR(init_panel(),    TAG, "panel init failed");
     ESP_RETURN_ON_ERROR(init_touch(),    TAG, "touch init failed");
     ESP_RETURN_ON_ERROR(init_lvgl(),     TAG, "LVGL init failed");
+
+    /* Set final brightness (init_backlight sets 0xFF for power-up stabilisation) */
+    display_set_brightness(BL_DEFAULT_LEVEL);
     return ESP_OK;
 }
 
