@@ -3,20 +3,18 @@
  *
  * Scrollable network host list — portrait 800×1280.
  *
- * Matches the Waveshare reference example pattern (rotation=ROTATE_0, no sw_rotate).
- *
  * Layout
  * ──────────────────────────────────────────────────────────────────────
- *  ┌─ Header (64px) ────────────────────────────────────────────────┐
- *  │  Network Scanner                               12:34           │
- *  │  Scanning 42 / 254 …                                           │
- *  ├────────────────────────────────────────────────────────────────┤
- *  │  IP ADDRESS          HOSTNAME                                  │
- *  ├────────────────────────────────────────────────────────────────┤
- *  │  ● 192.168.1.1       router.local                              │
- *  │  ● 192.168.1.5       michael-laptop.local                      │
- *  │  …  (scrollable)                                               │
- *  └────────────────────────────────────────────────────────────────┘
+ *  ┌─ Header (80px) ───────────────────────────────────────────────┐
+ *  │  Network Scanner                               12:34          │
+ *  │  Scanning 42 / 254 …                                          │
+ *  ├───────────────────────────────────────────────────────────────┤
+ *  │  HOST                                              PING       │
+ *  ├───────────────────────────────────────────────────────────────┤
+ *  │  ● router.local (192.168.1.1)                      2 ms       │
+ *  │  ● 192.168.1.5                                     1 ms       │
+ *  │  …  (scrollable)                                              │
+ *  └───────────────────────────────────────────────────────────────┘
  */
 
 #include <stdio.h>
@@ -51,8 +49,9 @@ static const char *TAG = "ui_net";
 #define ROW_H        52
 #define DOT_SIZE     12
 #define PAD_H        20    /* horizontal padding */
-#define IP_COL_W    220    /* fixed width for IP column */
-#define HOST_COL_X  (PAD_H + DOT_SIZE + 14 + IP_COL_W + 16)
+#define PING_COL_W   80    /* right-aligned ping column */
+#define HOST_COL_X   (PAD_H + DOT_SIZE + 14)
+#define HOST_COL_W   (LVGL_H_RES - HOST_COL_X - PING_COL_W - PAD_H)
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
@@ -66,7 +65,7 @@ static int       s_row_count  = 0;
 /* ------------------------------------------------------------------ */
 /*  Internal: add one row (LVGL lock must be held by caller)           */
 /* ------------------------------------------------------------------ */
-static void add_row_locked(const char *ip, const char *hostname)
+static void add_row_locked(const char *ip, const char *hostname, uint32_t rtt_ms)
 {
     lv_obj_t *row = lv_obj_create(s_list);
     lv_obj_set_size(row, LV_PCT(100), ROW_H);
@@ -89,24 +88,31 @@ static void add_row_locked(const char *ip, const char *hostname)
     lv_obj_set_style_border_width(dot, 0, LV_PART_MAIN);
     lv_obj_align(dot, LV_ALIGN_LEFT_MID, PAD_H, 0);
 
-    /* IP label */
-    lv_obj_t *ip_lbl = lv_label_create(row);
-    lv_obj_set_style_text_font(ip_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(ip_lbl, C_IP, LV_PART_MAIN);
-    lv_obj_set_width(ip_lbl, IP_COL_W);
-    lv_label_set_long_mode(ip_lbl, LV_LABEL_LONG_CLIP);
-    lv_label_set_text(ip_lbl, ip);
-    lv_obj_align(ip_lbl, LV_ALIGN_LEFT_MID, PAD_H + DOT_SIZE + 14, 0);
+    /* Host label — prefer hostname; if it equals IP, just show IP */
+    char display_name[96];
+    if (hostname[0] != '\0' && strcmp(hostname, ip) != 0) {
+        snprintf(display_name, sizeof(display_name), "%s (%s)", hostname, ip);
+    } else {
+        snprintf(display_name, sizeof(display_name), "%s", ip);
+    }
 
-    /* Hostname label */
-    int host_w = LVGL_H_RES - HOST_COL_X - PAD_H;
     lv_obj_t *host_lbl = lv_label_create(row);
     lv_obj_set_style_text_font(host_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(host_lbl, C_HOSTNAME, LV_PART_MAIN);
-    lv_obj_set_width(host_lbl, host_w);
+    lv_obj_set_width(host_lbl, HOST_COL_W);
     lv_label_set_long_mode(host_lbl, LV_LABEL_LONG_DOT);
-    lv_label_set_text(host_lbl, hostname);
+    lv_label_set_text(host_lbl, display_name);
     lv_obj_align(host_lbl, LV_ALIGN_LEFT_MID, HOST_COL_X, 0);
+
+    /* Ping label (right-aligned) */
+    char ping_str[16];
+    snprintf(ping_str, sizeof(ping_str), "%lu ms", (unsigned long)rtt_ms);
+
+    lv_obj_t *ping_lbl = lv_label_create(row);
+    lv_obj_set_style_text_font(ping_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ping_lbl, C_DIM, LV_PART_MAIN);
+    lv_label_set_text(ping_lbl, ping_str);
+    lv_obj_align(ping_lbl, LV_ALIGN_RIGHT_MID, -PAD_H, 0);
 
     s_row_count++;
 }
@@ -171,17 +177,17 @@ void ui_net_list_create(void)
     lv_obj_set_style_radius(col_hdr, 0, LV_PART_MAIN);
     lv_obj_clear_flag(col_hdr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *ch_ip = lv_label_create(col_hdr);
-    lv_obj_set_style_text_font(ch_ip, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(ch_ip, C_DIM, LV_PART_MAIN);
-    lv_label_set_text(ch_ip, "IP ADDRESS");
-    lv_obj_align(ch_ip, LV_ALIGN_LEFT_MID, PAD_H + DOT_SIZE + 14, 0);
-
     lv_obj_t *ch_host = lv_label_create(col_hdr);
     lv_obj_set_style_text_font(ch_host, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ch_host, C_DIM, LV_PART_MAIN);
-    lv_label_set_text(ch_host, "HOSTNAME");
+    lv_label_set_text(ch_host, "HOST");
     lv_obj_align(ch_host, LV_ALIGN_LEFT_MID, HOST_COL_X, 0);
+
+    lv_obj_t *ch_ping = lv_label_create(col_hdr);
+    lv_obj_set_style_text_font(ch_ping, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ch_ping, C_DIM, LV_PART_MAIN);
+    lv_label_set_text(ch_ping, "PING");
+    lv_obj_align(ch_ping, LV_ALIGN_RIGHT_MID, -PAD_H, 0);
 
     /* Scrollable host list */
     int list_top = HEADER_H + COL_HDR_H;
@@ -207,7 +213,7 @@ void ui_net_list_create(void)
 void ui_net_list_clear(void)
 {
     if (!s_list) return;
-    if (!lvgl_port_lock(100)) return;
+    if (!lvgl_port_lock(0)) return;
     lv_obj_clean(s_list);
     s_row_count = 0;
     lvgl_port_unlock();
@@ -216,11 +222,11 @@ void ui_net_list_clear(void)
 /* ------------------------------------------------------------------ */
 /*  Public: add host                                                   */
 /* ------------------------------------------------------------------ */
-void ui_net_list_add_host(const char *ip, const char *hostname)
+void ui_net_list_add_host(const char *ip, const char *hostname, uint32_t rtt_ms)
 {
     if (!s_list || !ip || !hostname) return;
-    if (!lvgl_port_lock(100)) return;
-    add_row_locked(ip, hostname);
+    if (!lvgl_port_lock(0)) return;  /* 0 = wait indefinitely */
+    add_row_locked(ip, hostname, rtt_ms);
     lvgl_port_unlock();
 }
 
@@ -230,7 +236,7 @@ void ui_net_list_add_host(const char *ip, const char *hostname)
 void ui_net_list_set_status(const char *text)
 {
     if (!s_status_lbl || !text) return;
-    if (!lvgl_port_lock(100)) return;
+    if (!lvgl_port_lock(0)) return;
     lv_label_set_text(s_status_lbl, text);
     lvgl_port_unlock();
 }

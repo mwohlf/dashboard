@@ -283,13 +283,17 @@ static esp_err_t init_i2c(void)
     ESP_LOGI(TAG, "I2C bus ready (SCL=%d SDA=%d %dHz)",
              I2C_SCL_PIN, I2C_SDA_PIN, I2C_CLK_HZ);
 
-    /* Scan — log every responding address so we can identify the backlight IC */
+    /* Scan — log every responding address so we can identify the backlight IC.
+     * Suppress i2c.master errors during scan (probing empty addresses times out). */
     ESP_LOGI(TAG, "I2C scan:");
+    esp_log_level_t prev = esp_log_level_get("i2c.master");
+    esp_log_level_set("i2c.master", ESP_LOG_WARN);
     for (uint8_t addr = 0x08; addr < 0x78; addr++) {
         if (i2c_master_probe(s_i2c_bus, addr, 10) == ESP_OK) {
             ESP_LOGI(TAG, "  device at 0x%02X", addr);
         }
     }
+    esp_log_level_set("i2c.master", prev);
 
     return ESP_OK;
 }

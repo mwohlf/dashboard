@@ -13,9 +13,11 @@ typedef void (*net_scan_start_cb_t)(void *ctx);
  * Callback fired each time a responding host is found.
  * @param ip       Dotted-decimal string, e.g. "192.168.1.10"
  * @param hostname Resolved hostname, or the IP string if DNS returned nothing
+ * @param rtt_ms   Round-trip ping time in milliseconds
  * @param ctx      User pointer passed to net_scanner_start()
  */
-typedef void (*net_scan_host_cb_t)(const char *ip, const char *hostname, void *ctx);
+typedef void (*net_scan_host_cb_t)(const char *ip, const char *hostname,
+                                   uint32_t rtt_ms, void *ctx);
 
 /**
  * Callback fired periodically during a scan with a progress update.

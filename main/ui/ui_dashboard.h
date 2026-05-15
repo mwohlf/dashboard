@@ -15,10 +15,10 @@ void ui_net_list_create(void);
 void ui_net_list_clear(void);
 
 /**
- * @brief Append a host row (green dot + IP + hostname).
+ * @brief Append a host row (green dot + host + ping).
  *        Thread-safe — acquires the LVGL lock internally.
  */
-void ui_net_list_add_host(const char *ip, const char *hostname);
+void ui_net_list_add_host(const char *ip, const char *hostname, uint32_t rtt_ms);
 
 /**
  * @brief Update the header status text (e.g. "Scanning 42 / 254").

@@ -156,9 +156,10 @@ static void on_scan_start(void *ctx)
     ui_net_list_set_status("Scanning…");
 }
 
-static void on_scan_host(const char *ip, const char *hostname, void *ctx)
+static void on_scan_host(const char *ip, const char *hostname,
+                         uint32_t rtt_ms, void *ctx)
 {
-    ui_net_list_add_host(ip, hostname);
+    ui_net_list_add_host(ip, hostname, rtt_ms);
 }
 
 static void on_scan_progress(int probed, int total, void *ctx)
