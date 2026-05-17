@@ -1,170 +1,239 @@
 # HA Dashboard
 
-A Home Assistant dashboard running on the **Waveshare ESP32-P4-Module-DEV-KIT-C** with a **Waveshare 10.1" DSI-TOUCH-A** display. It connects to Home Assistant over WebSocket and renders a live, touch-interactive entity grid using LVGL.
+A Home Assistant touch dashboard running on the **Waveshare ESP32-P4-Module-DEV-KIT-C** with a **Waveshare 10.1" DSI-TOUCH-A** display. Built with ESP-IDF v6.0.1 and LVGL 8.4.
 
-## What it does
+## Current state
 
-- Connects to your Wi-Fi network and Home Assistant instance
-- Subscribes to all HA entity state changes via the WebSocket API
-- Renders up to 32 entity cards (lights, switches, sensors, binary sensors, climate, covers) in a 3-column LVGL grid at 1280×800
-- Tapping a card calls `toggle` / `turn_on` / `turn_off` on the corresponding HA entity
-- Displays a live clock (SNTP-synced) and connection status indicator
+The dashboard connects to a Home Assistant instance over WebSocket and presents a 4-tab interface in landscape orientation (1280x800):
+
+| Tab | Icon | Contents | Interaction |
+|-----|------|----------|-------------|
+| **Net** | WiFi | Live hosts on the local /24 subnet (IP, hostname, ping RTT). Rescans every 60 s. | Read-only |
+| **Lights** | Charge (bulb) | All `light.*` entities + `switch.*` entities with "light" in the name (e.g. `switch.switchtoiletlight`) | Tap a row to toggle on/off |
+| **Temps** | Tint (drop) | All `sensor.*` entities with `device_class: temperature` | Read-only (value + unit) |
+| **Doors** | Eye | All `binary_sensor.*` entities with `device_class: door`, `window`, or `garage_door` | Read-only (OPEN / CLOSED) |
+
+Additional features:
+- SNTP-synced clock in the header bar
+- HA connection status indicator (green/yellow/red dot)
+- Automatic WebSocket reconnection (5 s timeout, 30 s ping keepalive)
+- Entity state updates arrive in real-time via `state_changed` event subscription
+
+### Layout
+
+```
++--------+------------------------------------------------------------+
+|  NET   |  Header bar (HA status dot + label + clock)                |
+|        +------------------------------------------------------------+
+|  LGT   |                                                            |
+|        |  Scrollable entity list                                    |
+|  TEMP  |  (content changes with selected tab)                       |
+|        |                                                            |
+|  DOOR  |                                                            |
++--------+------------------------------------------------------------+
+  100 px                      1180 px
+```
+
+---
 
 ## Hardware
 
-| Component | Part |
-|---|---|
-| SoC module | Waveshare ESP32-P4-Module-DEV-KIT-C |
-| Display | Waveshare 10.1-DSI-TOUCH-A (JD9365, 800×1280, MIPI-DSI) |
-| Touch controller | GT911 (I2C) |
-| Network | RJ45 Ethernet (RMII, internal EMAC + external PHY) |
+| Component | Part | Notes |
+|-----------|------|-------|
+| SoC module | Waveshare ESP32-P4-Module-DEV-KIT-C | RISC-V dual-core @ 360 MHz, 16 MB flash, 32 MB octal PSRAM |
+| Display | Waveshare 10.1-DSI-TOUCH-A | JD9365 panel, 800x1280 portrait, 2-lane MIPI-DSI. LVGL sw_rotate gives 1280x800 landscape |
+| Touch | GT911 capacitive (I2C) | Shared I2C bus with backlight controller |
+| Backlight | I2C controller at 0x45 | Reg 0x95 power gate, reg 0x96 brightness (0--255) |
+| Network | RJ45 Ethernet (RMII) | Internal EMAC + IP101GRI PHY, DHCP |
+
+### Display pipeline
+
+The display is physically portrait (800x1280). Initialisation in `display.c`:
+
+1. I2C bus on GPIO 7 (SDA) / GPIO 8 (SCL) at 400 kHz
+2. Backlight controller power gate (reg 0x95: write 0x11 then 0x17), then brightness via reg 0x96
+3. DSI PHY LDO enabled on internal channel 3 at 2500 mV
+4. DSI bus: 2 lanes @ 1500 Mbps
+5. BTA workaround applied (v1.x silicon hangs if `cmd_ack` is true)
+6. JD9365 panel init with Waveshare-specific register overrides (200+ vendor commands)
+7. GT911 touch on the same I2C bus
+8. LVGL port registered with double-buffered partial rendering (100 lines/buffer in PSRAM, `sw_rotate` for landscape)
+
+---
 
 ## Project structure
 
 ```
 main/
-  app_main.c        — boot sequence: Ethernet → SNTP → display → LVGL → HA client
-  config.h          — all user-configurable values (Wi-Fi, HA host/token, pins)
-  display.c/h       — MIPI-DSI panel + backlight + touch init, LVGL registration
-  ha_client.c/h     — WebSocket connection, auth, state subscription, service calls
+  app_main.c          -- boot sequence: NVS -> Ethernet -> SNTP -> display -> UI -> HA client -> scanner -> 1 s timer
+  config.h            -- all user-configurable values (network, HA, display, GPIO pins)
+  display.c/h         -- MIPI-DSI panel + backlight + touch init, LVGL registration
+  ha_client.c/h       -- WebSocket client: auth, get_states, subscribe_events, call_service
+  net_scanner.c/h     -- ICMP /24 subnet scanner with reverse DNS
   ui/
-    ui_dashboard.c/h — LVGL dashboard screen (entity cards, clock, status bar)
+    ui_dashboard.c/h  -- 4-tab LVGL dashboard (net, lights, temps, doors)
 ```
+
+---
 
 ## Prerequisites
 
-- [ESP-IDF v6.0.x](https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/get-started/)
+- [ESP-IDF v6.0.1](https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/get-started/) installed (e.g. at `~/.espressif/v6.0.1/esp-idf/`)
 - Python 3.x (3.14 confirmed working)
-- VS Code with the Espressif IDF extension
+- Target chip set to `esp32p4`
 
 ---
 
-## VS Code ESP-IDF extension setup
+## Configuration
 
-### 1. Install the extension
+All user-configurable values live in `main/config.h`. Edit before building.
 
-Open VS Code, go to the Extensions panel (`Ctrl+Shift+X`), search for **ESP-IDF** and install the extension published by Espressif Systems.
+### Home Assistant
 
-### 2. Run the setup wizard
-
-Open the command palette (`Ctrl+Shift+P`) and run:
-
-```
-ESP-IDF: Configure ESP-IDF Extension
+```c
+#define HA_HOST   "192.168.178.30"   // HA IP or hostname
+#define HA_PORT   8123
+#define HA_TOKEN  "eyJ..."           // Long-Lived Access Token
 ```
 
-Choose **Express** setup. Set:
-
-- **ESP-IDF version**: `v6.0.1` (or select "Find ESP-IDF in your system" if already installed)
-- **ESP-IDF Tools directory**: `~/.espressif`
-
-The wizard will download the toolchain and create the Python virtual environment. This takes a few minutes.
-
-### 3. Select the target chip
-
-Open the command palette and run:
-
-```
-ESP-IDF: Set Espressif Device Target
-```
-
-Select **esp32p4**.
-
-Alternatively, from a terminal with the IDF environment sourced:
-
-```bash
-. ~/.espressif/v6.0.1/esp-idf/export.sh
-idf.py set-target esp32p4
-```
-
-### 4. Select the serial port
-
-Connect the dev kit via USB, then run:
-
-```
-ESP-IDF: Select Port to Use
-```
-
-Pick the port for your board (e.g. `/dev/ttyUSB0` or `/dev/ttyACM0` on Linux).
-
----
-
-## Project configuration
-
-All user-configurable values live in **`main/config.h`**. Edit this file before building.
+To generate a token: open HA -> click your profile -> Security -> Long-Lived Access Tokens -> Create Token.
 
 ### Ethernet PHY
 
-The board uses the ESP32-P4's internal EMAC with an external RMII PHY (defaulting to IP101). Verify the pins and PHY type against your board's schematic and update `config.h`:
-
 ```c
-#define ETH_MDC_GPIO     GPIO_NUM_31   // MDIO clock
-#define ETH_MDIO_GPIO    GPIO_NUM_52   // MDIO data
-#define ETH_PHY_ADDR     1             // PHY address (0 or 1, check strap pins)
-#define ETH_PHY_RST_GPIO GPIO_NUM_NC   // set if a reset GPIO is wired
+#define ETH_MDC_GPIO     GPIO_NUM_31
+#define ETH_MDIO_GPIO    GPIO_NUM_52
+#define ETH_PHY_ADDR     1
+#define ETH_PHY_RST_GPIO GPIO_NUM_51
 ```
 
-If your board uses a different PHY chip (LAN8720, RTL8201, etc.), change the `esp_eth_phy_new_*` call in `app_main.c:eth_init()` accordingly. The network is configured via DHCP automatically.
-
-### Home Assistant connection
-
-```c
-#define HA_HOST   "192.168.1.100"   // IP or hostname of your HA instance
-#define HA_PORT   8123
-#define HA_TOKEN  "eyJ..."          // Long-Lived Access Token (see below)
-```
-
-To generate a Long-Lived Access Token in Home Assistant:
-1. Open your HA profile (click your username in the sidebar)
-2. Scroll to **Security → Long-Lived Access Tokens**
-3. Click **Create Token**, give it a name, copy the value into `HA_TOKEN`
+If your board uses a different PHY chip (LAN8720, RTL8201, etc.), change the `esp_eth_phy_new_*` call in `app_main.c`.
 
 ### Timezone
 
-In `app_main.c`, update the `TZ` environment variable to your timezone string:
+In `app_main.c`, update the POSIX TZ string:
 
 ```c
-setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);   // Central Europe example
+setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
 ```
 
-Standard POSIX timezone strings can be found at [https://github.com/nayarsystems/posix_tz_db](https://github.com/nayarsystems/posix_tz_db).
+See [posix_tz_db](https://github.com/nayarsystems/posix_tz_db) for other timezones.
 
 ---
 
-## Building and flashing
+## Building, reconfiguring, and flashing
 
-### From VS Code
-
-Use the status bar buttons at the bottom of the window:
-
-- **Build** (wrench icon) — compiles the project
-- **Flash** (lightning icon) — flashes to the connected device
-- **Monitor** (screen icon) — opens the serial monitor
-- **Build, Flash and Monitor** — does all three in sequence
-
-### From the terminal
+All commands below assume ESP-IDF is sourced first:
 
 ```bash
-. ~/.espressif/v6.0.1/esp-idf/export.sh
+source ~/.espressif/v6.0.1/esp-idf/export.sh
+```
+
+### Build
+
+```bash
 idf.py build
+```
+
+Dependencies declared in `main/idf_component.yml` are fetched automatically into `managed_components/` on first build.
+
+### Reconfigure (menuconfig)
+
+To change Kconfig options (PSRAM settings, LVGL memory, log levels, stack sizes, etc.):
+
+```bash
+idf.py menuconfig
+```
+
+This opens a TUI. Navigate with arrow keys, Enter to select, Esc to go back. Changes are saved to `sdkconfig`. Persistent defaults go in `sdkconfig.defaults` so they survive a `fullclean`.
+
+To apply `sdkconfig.defaults` without the TUI (useful after editing `sdkconfig.defaults` by hand):
+
+```bash
+idf.py reconfigure
+```
+
+Notable Kconfig settings for this project (already set in `sdkconfig.defaults`):
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `CONFIG_SPIRAM` | `y` | Enable 32 MB PSRAM |
+| `CONFIG_LV_MEM_CUSTOM` | `y` | LVGL allocates from system heap (PSRAM-backed) instead of tiny internal pool |
+| `CONFIG_ESP_LVGL_PORT_TASK_STACK_SIZE` | `8192` | Larger stack for LVGL task |
+| `CONFIG_LWIP_TCP_SND_BUF_DEFAULT` | `65535` | Larger TCP buffers for WebSocket |
+
+### Flash
+
+```bash
+idf.py -p /dev/ttyUSB0 flash
+```
+
+Replace `/dev/ttyUSB0` with your serial port (`/dev/ttyACM0`, `COM3`, etc.).
+
+### Monitor (serial log output)
+
+```bash
+idf.py -p /dev/ttyUSB0 monitor
+```
+
+Press `Ctrl+]` to exit.
+
+### Build + flash + monitor in one step
+
+```bash
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-Press `Ctrl+]` to exit the monitor.
+### Full clean rebuild
+
+If you change `sdkconfig.defaults`, switch targets, or update managed components:
+
+```bash
+idf.py fullclean
+idf.py build
+```
+
+### VS Code
+
+If using the Espressif IDF extension:
+
+1. `Ctrl+Shift+P` -> **ESP-IDF: Set Espressif Device Target** -> `esp32p4`
+2. `Ctrl+Shift+P` -> **ESP-IDF: Select Port to Use** -> pick your serial port
+3. Use the status bar buttons: Build (wrench), Flash (lightning), Monitor (screen)
 
 ---
 
-## Dependency notes
+## Dependencies
 
-This project uses the IDF Component Manager. Dependencies are declared in `main/idf_component.yml` and downloaded automatically into `managed_components/` on first build. Do not edit files under `managed_components/` — they are not checked in and will be regenerated.
+Declared in `main/idf_component.yml`, managed automatically:
 
-Key components:
+| Component | Version | Purpose |
+|-----------|---------|---------|
+| `lvgl/lvgl` | 8.4.x | Graphics library |
+| `espressif/esp_lvgl_port` | ^2 | LVGL task, display flush, touch input |
+| `espressif/esp_lcd_jd9365` | ^2 | MIPI-DSI panel driver (Waveshare init override in display.c) |
+| `espressif/esp_lcd_touch_gt911` | ^1 | Capacitive touch driver |
+| `espressif/cjson` | ^1 | JSON parsing for HA WebSocket messages |
+| `espressif/esp_websocket_client` | ^1 | WebSocket client for HA API |
 
-| Component | Purpose |
-|---|---|
-| `espressif/esp_lcd_jd9365` | MIPI-DSI panel driver |
-| `espressif/esp_lcd_touch_gt911` | Capacitive touch driver |
-| `espressif/esp_lvgl_port` | LVGL task + display/touch integration |
-| `lvgl/lvgl` | Graphics library (v8.4) |
-| `espressif/esp_websocket_client` | WebSocket transport for HA API |
-| `espressif/cjson` | JSON parsing for HA messages |
+Do not edit files under `managed_components/` -- they are fetched on build and not checked in.
+
+---
+
+## Architecture notes
+
+### HA client threading model
+
+The HA WebSocket client (`ha_client.c`) runs inside the `esp_websocket_client` event loop task. When entity data arrives (from `get_states` or `state_changed` events), it is parsed and delivered to the UI via `ui_dashboard_ha_update()`.
+
+To avoid crashes, **LVGL widget creation is decoupled from the WebSocket callback**:
+
+1. `ui_dashboard_ha_update()` only copies entity data into slot arrays (no LVGL calls, no locks)
+2. A dirty flag (`s_ha_dirty`) is set when new data arrives
+3. `ui_dashboard_tick_1s()` (called from a 1 s `esp_timer`) acquires the LVGL lock once, checks the flag, and creates/updates widgets in batches (max 10 new rows per tick)
+
+This prevents LVGL heap exhaustion and stack overflow that would occur if hundreds of widgets were created directly from the WebSocket callback context.
+
+### LVGL thread safety
+
+All `lv_*` calls from outside the LVGL task must be wrapped in `lvgl_port_lock()` / `lvgl_port_unlock()`. The network scanner and HA connection status callbacks follow this pattern. Entity widget sync uses the batched approach described above.

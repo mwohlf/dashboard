@@ -3941,6 +3941,15 @@ CONFIG_ESP_LCD_TOUCH_MAX_BUTTONS=1
 # end of ESP LCD TOUCH
 
 #
+# ESP WebSocket client
+#
+# default:
+# CONFIG_ESP_WS_CLIENT_ENABLE_DYNAMIC_BUFFER is not set
+# default:
+# CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK is not set
+# end of ESP WebSocket client
+
+#
 # LVGL configuration
 #
 # default:
@@ -3974,12 +3983,9 @@ CONFIG_LV_COLOR_CHROMA_KEY_HEX=0x00FF00
 #
 # Memory settings
 #
+CONFIG_LV_MEM_CUSTOM=y
 # default:
-# CONFIG_LV_MEM_CUSTOM is not set
-# default:
-CONFIG_LV_MEM_SIZE_KILOBYTES=32
-# default:
-CONFIG_LV_MEM_ADDR=0x0
+CONFIG_LV_MEM_CUSTOM_INCLUDE="stdlib.h"
 # default:
 CONFIG_LV_MEM_BUF_MAX_NUM=16
 # default:
@@ -4074,8 +4080,6 @@ CONFIG_LV_ASSERT_HANDLER_INCLUDE="assert.h"
 #
 # default:
 # CONFIG_LV_USE_PERF_MONITOR is not set
-# default:
-# CONFIG_LV_USE_MEM_MONITOR is not set
 # default:
 # CONFIG_LV_USE_REFR_DEBUG is not set
 # default:

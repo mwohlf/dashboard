@@ -24,12 +24,14 @@ typedef enum {
 #define HA_MAX_NAME_LEN        48
 #define HA_MAX_STATE_LEN       32
 #define HA_MAX_ATTR_LEN        64   /* e.g. unit_of_measurement */
+#define HA_MAX_DEVCLASS_LEN    32   /* e.g. temperature, door, window */
 
 typedef struct {
     char            entity_id[HA_MAX_ENTITY_ID_LEN];
     char            name[HA_MAX_NAME_LEN];
     char            state[HA_MAX_STATE_LEN];
-    char            unit[HA_MAX_ATTR_LEN];     /* sensor: unit_of_measurement */
+    char            unit[HA_MAX_ATTR_LEN];       /* sensor: unit_of_measurement */
+    char            device_class[HA_MAX_DEVCLASS_LEN]; /* e.g. "temperature", "door" */
     ha_entity_type_t type;
     bool            valid;
 } ha_entity_t;

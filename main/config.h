@@ -14,9 +14,9 @@
  * Generate a Long-Lived Access Token in HA:
  *   Profile → Security → Long-Lived Access Tokens → Create Token
  * ============================================================ */
-#define HA_HOST          "192.168.1.100"   /* HA IP or hostname */
+#define HA_HOST          "192.168.178.30"   /* HA IP or hostname */
 #define HA_PORT          8123
-#define HA_TOKEN         "YOUR_LONG_LIVED_ACCESS_TOKEN"
+#define HA_TOKEN         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJkMWExMTFhNTE4ZjQ0NTU4ODcwM2U1ZTVhZTAxOTYxZSIsImlhdCI6MTc3OTAzODkzNSwiZXhwIjoyMDk0Mzk4OTM1fQ.JRQxU4Y3rBLwFh-V7ktenSkAFXg7ql-4Pc6TyAweOjE"
 #define HA_WS_URI        "ws://" HA_HOST ":" "8123" "/api/websocket"
 
 /* ============================================================
@@ -26,8 +26,8 @@
  * ============================================================ */
 #define PHYS_H_RES       800
 #define PHYS_V_RES       1280
-#define LVGL_H_RES       800    /* portrait, no rotation — matches reference ROTATE_0 */
-#define LVGL_V_RES       1280
+#define LVGL_H_RES       1280   /* landscape after 90° sw_rotate */
+#define LVGL_V_RES       800
 
 /* DSI PHY internal LDO (must be 2500 mV) */
 #define DSI_PHY_LDO_CHAN 3
@@ -57,5 +57,4 @@
 /* ============================================================
  * Dashboard layout
  * ============================================================ */
-#define DASH_COLS        3      /* entity cards per row */
-#define DASH_MAX_ENTITIES 32    /* max tracked entities */
+#define DASH_SIDEBAR_W   100    /* left tab bar width (px) */

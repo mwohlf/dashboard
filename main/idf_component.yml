@@ -22,3 +22,7 @@ dependencies:
   # cJSON (moved out of ESP-IDF core in v6.x)
   espressif/cjson:
     version: "^1"
+
+  # WebSocket client for Home Assistant API
+  espressif/esp_websocket_client:
+    version: "^1"

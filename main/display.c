@@ -463,22 +463,21 @@ static esp_err_t init_lvgl(void)
     const lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init failed");
 
-    /* Register display — portrait 800×1280, no software rotation.
+    /* Register display — landscape 1280×800 via sw_rotate from 800×1280 portrait.
      *
-     * avoid_tearing=true + full_refresh=true: required pairing for DPI double-buffer.
-     *   - avoid_tearing: port gets two PSRAM DPI framebuffers; registers on_refresh_done
-     *     ISR which gives a semaphore at vsync.
-     *   - full_refresh: flush_cb waits on that semaphore (properly blocking, not spinning),
-     *     then calls lv_disp_flush_ready().  Without full_refresh, the semaphore path in
-     *     flush_cb is dead code → lv_disp_flush_ready() never called → LVGL spins at
-     *     lv_refr.c:709 starving IDLE and the display never updates.
-     * Requires num_fbs=2 in dpi_cfg so the port can retrieve both framebuffer pointers. */
+     * sw_rotate requires LVGL to use its own buffers (not direct DPI framebuffers)
+     * so that rotation can be applied during flush.  This means avoid_tearing must
+     * be false — the direct-render double-buffer path bypasses the rotation step.
+     * LVGL allocates buffers in PSRAM (buff_spiram=true) and copies rotated pixels
+     * to the single DPI framebuffer on each flush.  Minor tearing is acceptable for
+     * a dashboard.  full_refresh=true ensures the entire frame is flushed each cycle
+     * so rotation produces a coherent image. */
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle      = NULL,
         .panel_handle   = s_panel,
         .control_handle = NULL,
         .buffer_size    = PHYS_H_RES * LVGL_BUF_LINES,
-        .double_buffer  = false,
+        .double_buffer  = true,
         .hres           = PHYS_H_RES,
         .vres           = PHYS_V_RES,
         .monochrome     = false,
@@ -489,23 +488,22 @@ static esp_err_t init_lvgl(void)
         },
         .flags = {
             .buff_dma     = false,
-            .buff_spiram  = false,
-            .sw_rotate    = false,
-            .full_refresh = true,  /* required with avoid_tearing: the port's on_refresh_done ISR
-                                    * gives a semaphore; flush_cb waits on it (yielding the task),
-                                    * then calls lv_disp_flush_ready().  Without full_refresh the
-                                    * semaphore path is never entered and lv_disp_flush_ready() is
-                                    * never called → LVGL spins at lv_refr.c:709 forever. */
+            .buff_spiram  = true,
+            .sw_rotate    = true,
+            .full_refresh = false,
         },
     };
     const lvgl_port_display_dsi_cfg_t dsi_cfg = {
-        .flags.avoid_tearing = true,
+        .flags.avoid_tearing = false,
     };
     s_lvgl_disp = lvgl_port_add_disp_dsi(&disp_cfg, &dsi_cfg);
     if (!s_lvgl_disp) {
         ESP_LOGE(TAG, "lvgl_port_add_disp_dsi returned NULL");
         return ESP_FAIL;
     }
+
+    /* Rotate 90° → landscape 1280×800 */
+    lv_disp_set_rotation(s_lvgl_disp, LV_DISP_ROT_90);
 
     /* Register touch input */
     const lvgl_port_touch_cfg_t touch_cfg = {
@@ -517,7 +515,7 @@ static esp_err_t init_lvgl(void)
         ESP_LOGW(TAG, "lvgl_port_add_touch returned NULL (touch may not work)");
     }
 
-    ESP_LOGI(TAG, "LVGL port ready (%dx%d portrait)", PHYS_H_RES, PHYS_V_RES);
+    ESP_LOGI(TAG, "LVGL port ready (%dx%d landscape)", LVGL_H_RES, LVGL_V_RES);
     return ESP_OK;
 }
 

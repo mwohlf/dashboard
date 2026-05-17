@@ -34,3 +34,6 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # LVGL task stack size (esp_lvgl_port default is 6KB; bump for HA UI)
 CONFIG_ESP_LVGL_PORT_TASK_STACK_SIZE=8192
+
+# LVGL memory: use system heap (includes 32MB PSRAM) instead of tiny internal pool
+CONFIG_LV_MEM_CUSTOM=y

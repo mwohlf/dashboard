@@ -9,9 +9,10 @@
  *  2. Ethernet (RMII, internal EMAC) — waits for DHCP lease
  *  3. SNTP time sync
  *  4. Display init (I2C → backlight → MIPI-DSI JD9365 → GT911 touch → LVGL)
- *  5. Create network list UI
- *  6. Start subnet scanner
- *  7. 1-second timer for clock updates
+ *  5. Create tabbed dashboard UI (Network | Lights | Temps | Doors)
+ *  6. Start HA WebSocket client
+ *  7. Start subnet scanner
+ *  8. 1-second timer for clock updates
  */
 
 #include <stdio.h>
@@ -33,6 +34,7 @@
 #include "config.h"
 #include "display.h"
 #include "net_scanner.h"
+#include "ha_client.h"
 #include "ui_dashboard.h"
 
 static const char *TAG = "app_main";
@@ -152,28 +154,41 @@ static void sntp_init_and_sync(void)
 /* ------------------------------------------------------------------ */
 static void on_scan_start(void *ctx)
 {
-    ui_net_list_clear();
-    ui_net_list_set_status("Scanning…");
+    ui_dashboard_net_clear();
+    ui_dashboard_net_set_status("Scanning...");
 }
 
 static void on_scan_host(const char *ip, const char *hostname,
                          uint32_t rtt_ms, void *ctx)
 {
-    ui_net_list_add_host(ip, hostname, rtt_ms);
+    ui_dashboard_net_add_host(ip, hostname, rtt_ms);
 }
 
 static void on_scan_progress(int probed, int total, void *ctx)
 {
     char buf[40];
     snprintf(buf, sizeof(buf), "Scanning %d / %d", probed, total);
-    ui_net_list_set_status(buf);
+    ui_dashboard_net_set_status(buf);
 }
 
 static void on_scan_done(int found, void *ctx)
 {
     char buf[48];
     snprintf(buf, sizeof(buf), "%d host%s found", found, found == 1 ? "" : "s");
-    ui_net_list_set_status(buf);
+    ui_dashboard_net_set_status(buf);
+}
+
+/* ------------------------------------------------------------------ */
+/*  HA callbacks → UI                                                  */
+/* ------------------------------------------------------------------ */
+static void on_ha_state(const ha_entity_t *entity, void *ctx)
+{
+    ui_dashboard_ha_update(entity);
+}
+
+static void on_ha_conn(ha_conn_status_t status, void *ctx)
+{
+    ui_dashboard_ha_conn_update(status);
 }
 
 /* ------------------------------------------------------------------ */
@@ -181,7 +196,7 @@ static void on_scan_done(int found, void *ctx)
 /* ------------------------------------------------------------------ */
 static void timer_1s_cb(void *arg)
 {
-    ui_net_list_tick_1s();
+    ui_dashboard_tick_1s();
 }
 
 /* ------------------------------------------------------------------ */
@@ -217,17 +232,20 @@ void app_main(void)
 
     /* 5. Create UI */
     lvgl_port_lock(0);
-    ui_net_list_create();
+    ui_dashboard_create();
     lvgl_port_unlock();
 
-    /* 6. Start subnet scanner */
+    /* 6. Start HA WebSocket client */
+    ESP_ERROR_CHECK(ha_client_start(on_ha_state, on_ha_conn, NULL));
+
+    /* 7. Start subnet scanner */
     ESP_ERROR_CHECK(net_scanner_start(on_scan_start,
                                       on_scan_host,
                                       on_scan_progress,
                                       on_scan_done,
                                       NULL));
 
-    /* 7. 1-second periodic timer (clock update) */
+    /* 8. 1-second periodic timer (clock update) */
     const esp_timer_create_args_t timer_args = {
         .callback = timer_1s_cb,
         .name     = "dash_1s",

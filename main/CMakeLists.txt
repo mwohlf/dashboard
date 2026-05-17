@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "display.c"
+        "ha_client.c"
         "net_scanner.c"
         "ui/ui_dashboard.c"
     INCLUDE_DIRS

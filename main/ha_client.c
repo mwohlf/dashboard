@@ -36,7 +36,7 @@ static const char *TAG = "ha_client";
 /* ------------------------------------------------------------------ */
 /*  Internal state                                                      */
 /* ------------------------------------------------------------------ */
-#define HA_WS_RX_BUF_SIZE  (16 * 1024)
+#define HA_WS_RX_BUF_SIZE  (256 * 1024)
 
 static esp_websocket_client_handle_t s_ws_client = NULL;
 static ha_state_cb_t s_state_cb  = NULL;
@@ -98,6 +98,11 @@ static void parse_entity_from_json(cJSON *state_obj)
         cJSON *j_unit = cJSON_GetObjectItem(j_attrs, "unit_of_measurement");
         if (j_unit && j_unit->valuestring) {
             strlcpy(entity.unit, j_unit->valuestring, sizeof(entity.unit));
+        }
+        /* Device class (temperature, door, window, etc.) */
+        cJSON *j_dc = cJSON_GetObjectItem(j_attrs, "device_class");
+        if (j_dc && j_dc->valuestring) {
+            strlcpy(entity.device_class, j_dc->valuestring, sizeof(entity.device_class));
         }
     }
     /* Fall back to entity_id if no friendly name */
@@ -217,20 +222,24 @@ static void ws_event_handler(void                      *handler_args,
         }
         if (!data->data_ptr || data->data_len <= 0) break;
 
-        /* Accumulate fragmented frames */
+        /* Accumulate chunks — esp_websocket_client splits large frames
+         * into buffer_size chunks.  payload_offset tells us where this
+         * chunk sits within the full WebSocket payload. */
         if (s_rx_used + data->data_len < HA_WS_RX_BUF_SIZE) {
             memcpy(s_rx_buf + s_rx_used, data->data_ptr, data->data_len);
             s_rx_used += data->data_len;
         } else {
-            ESP_LOGE(TAG, "RX buffer overflow — dropping frame");
+            ESP_LOGE(TAG, "RX buffer overflow (%d + %d > %d) — dropping",
+                     (int)s_rx_used, data->data_len, HA_WS_RX_BUF_SIZE);
             s_rx_used = 0;
             break;
         }
 
-        /* Is this the last (or only) fragment? */
-        if (data->fin) {
+        /* Complete payload received?  payload_len is the total frame
+         * payload size; we're done when offset + chunk reaches it. */
+        if (data->payload_offset + data->data_len >= data->payload_len) {
             s_rx_buf[s_rx_used] = '\0';
-            ESP_LOGD(TAG, "RX (%d bytes)", (int)s_rx_used);
+            ESP_LOGD(TAG, "RX complete (%d bytes)", (int)s_rx_used);
             handle_message(s_rx_buf, (int)s_rx_used);
             s_rx_used = 0;
         }
@@ -265,7 +274,7 @@ esp_err_t ha_client_start(ha_state_cb_t state_cb,
     esp_websocket_client_config_t ws_cfg = {
         .uri              = HA_WS_URI,
         .port             = HA_PORT,
-        .buffer_size      = 4096,
+        .buffer_size      = 16384,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms   = 10000,
         .ping_interval_sec    = 30,

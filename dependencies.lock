@@ -55,6 +55,16 @@ dependencies:
       path: components/espressif__esp_lvgl_port
       type: local
     version: 2.7.2
+  espressif/esp_websocket_client:
+    component_hash: 3fb288702517ef4d75bf933a115f1056ee0c2540d964f9e1d856e0bb67e1dfeb
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.0
   idf:
     source:
       type: idf
@@ -72,8 +82,9 @@ direct_dependencies:
 - espressif/esp_lcd_jd9365
 - espressif/esp_lcd_touch_gt911
 - espressif/esp_lvgl_port
+- espressif/esp_websocket_client
 - idf
 - lvgl/lvgl
-manifest_hash: a80ad3a92c5d40026bb98e264119eb3fcd514869890cf7341a5b6fcee2fd1e2a
+manifest_hash: cab983d7b96c69f6a5bf7718f6e52d7996476efa3a4f572366b5f8f91ea087cc
 target: esp32p4
 version: 3.0.0
